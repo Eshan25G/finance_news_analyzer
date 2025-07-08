@@ -6,27 +6,11 @@ import json
 from datetime import datetime, timedelta
 import time
 import re
-from textblob import TextBlob
+from urllib.parse import urlparse
+import xml.etree.ElementTree as ET
+from collections import Counter
 import plotly.graph_objects as go
 import plotly.express as px
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
-import yfinance as yf
-from newsapi import NewsApiClient
-import feedparser
-import nltk
-from collections import Counter
-import asyncio
-import aiohttp
-from typing import List, Dict, Any
-
-# Download required NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('vader_lexicon', quiet=True)
-except:
-    pass
 
 # Page configuration
 st.set_page_config(
@@ -36,7 +20,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -69,317 +53,376 @@ st.markdown("""
     .sentiment-negative { color: #dc3545; font-weight: bold; }
     .sentiment-neutral { color: #ffc107; font-weight: bold; }
     
-    .stMetric > div > div > div > div {
-        color: #1e3c72;
-    }
+    .risk-low { background: #d4edda; padding: 0.5rem; border-radius: 5px; color: #155724; }
+    .risk-medium { background: #fff3cd; padding: 0.5rem; border-radius: 5px; color: #856404; }
+    .risk-high { background: #f8d7da; padding: 0.5rem; border-radius: 5px; color: #721c24; }
 </style>
 """, unsafe_allow_html=True)
 
-class FinanceNewsAnalyzer:
+class SimpleFinanceAnalyzer:
     def __init__(self):
-        self.financial_keywords = {
-            'positive': ['profit', 'growth', 'increase', 'gain', 'rise', 'bull', 'rally', 'surge', 'boom', 'expansion', 
-                        'revenue', 'earnings', 'outperform', 'strong', 'robust', 'upgrade', 'beat', 'exceed'],
-            'negative': ['loss', 'decline', 'decrease', 'fall', 'drop', 'bear', 'crash', 'recession', 'bankruptcy', 
-                        'debt', 'deficit', 'downturn', 'underperform', 'weak', 'struggling', 'downgrade', 'miss'],
-            'neutral': ['merger', 'acquisition', 'announcement', 'report', 'statement', 'market', 'stock', 'shares', 
-                       'company', 'financial', 'quarterly', 'annual', 'forecast', 'outlook', 'dividend']
-        }
+        self.positive_words = [
+            'profit', 'growth', 'increase', 'gain', 'rise', 'bull', 'rally', 'surge', 'boom', 
+            'expansion', 'revenue', 'earnings', 'outperform', 'strong', 'robust', 'upgrade', 
+            'beat', 'exceed', 'success', 'breakthrough', 'soar', 'jump', 'climb', 'advance'
+        ]
         
-        self.stock_tickers = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX', 'JPM', 'BAC']
+        self.negative_words = [
+            'loss', 'decline', 'decrease', 'fall', 'drop', 'bear', 'crash', 'recession', 
+            'bankruptcy', 'debt', 'deficit', 'downturn', 'underperform', 'weak', 'struggling', 
+            'downgrade', 'miss', 'failure', 'plunge', 'tumble', 'slide', 'collapse', 'slump'
+        ]
         
-    def analyze_sentiment(self, text: str) -> Dict[str, Any]:
-        """Analyze sentiment of the given text"""
-        blob = TextBlob(text)
-        polarity = blob.sentiment.polarity
+        self.neutral_words = [
+            'merger', 'acquisition', 'announcement', 'report', 'statement', 'market', 'stock', 
+            'shares', 'company', 'financial', 'quarterly', 'annual', 'forecast', 'outlook', 
+            'dividend', 'analyst', 'estimate', 'guidance', 'conference', 'meeting'
+        ]
         
-        if polarity > 0.1:
+        self.stock_tickers = [
+            'AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX', 'JPM', 'BAC',
+            'WMT', 'JNJ', 'PG', 'UNH', 'HD', 'DIS', 'PYPL', 'ADBE', 'CRM', 'INTC'
+        ]
+    
+    def simple_sentiment_analysis(self, text: str) -> dict:
+        """Simple sentiment analysis using keyword counting"""
+        text_lower = text.lower()
+        
+        positive_count = sum(1 for word in self.positive_words if word in text_lower)
+        negative_count = sum(1 for word in self.negative_words if word in text_lower)
+        neutral_count = sum(1 for word in self.neutral_words if word in text_lower)
+        
+        total_words = len(text.split())
+        
+        if positive_count > negative_count:
             sentiment = 'Positive'
-            color = 'sentiment-positive'
-        elif polarity < -0.1:
+            polarity = min(0.8, positive_count / max(total_words, 1) * 10)
+        elif negative_count > positive_count:
             sentiment = 'Negative'
-            color = 'sentiment-negative'
+            polarity = -min(0.8, negative_count / max(total_words, 1) * 10)
         else:
             sentiment = 'Neutral'
-            color = 'sentiment-neutral'
-            
+            polarity = 0.0
+        
         return {
             'sentiment': sentiment,
             'polarity': polarity,
-            'subjectivity': blob.sentiment.subjectivity,
-            'color': color,
+            'positive_count': positive_count,
+            'negative_count': negative_count,
+            'neutral_count': neutral_count,
             'confidence': abs(polarity)
         }
     
-    def extract_financial_metrics(self, text: str) -> Dict[str, Any]:
-        """Extract financial metrics and keywords from text"""
-        text_lower = text.lower()
-        
-        # Extract numbers with financial context
+    def extract_financial_data(self, text: str) -> dict:
+        """Extract financial information from text"""
+        # Extract prices
         price_pattern = r'\$[\d,]+\.?\d*'
-        percentage_pattern = r'\d+\.?\d*%'
-        
         prices = re.findall(price_pattern, text)
+        
+        # Extract percentages
+        percentage_pattern = r'\d+\.?\d*%'
         percentages = re.findall(percentage_pattern, text)
         
         # Extract stock tickers
-        ticker_pattern = r'\b[A-Z]{1,5}\b'
+        ticker_pattern = r'\b[A-Z]{2,5}\b'
         potential_tickers = re.findall(ticker_pattern, text)
         tickers = [t for t in potential_tickers if t in self.stock_tickers]
         
-        # Count keyword categories
-        pos_count = sum(1 for word in self.financial_keywords['positive'] if word in text_lower)
-        neg_count = sum(1 for word in self.financial_keywords['negative'] if word in text_lower)
-        neu_count = sum(1 for word in self.financial_keywords['neutral'] if word in text_lower)
+        # Extract numbers
+        number_pattern = r'\b\d+\.?\d*\b'
+        numbers = re.findall(number_pattern, text)
         
         return {
-            'prices': prices,
-            'percentages': percentages,
-            'tickers': tickers,
-            'positive_keywords': pos_count,
-            'negative_keywords': neg_count,
-            'neutral_keywords': neu_count,
-            'total_financial_words': pos_count + neg_count + neu_count
+            'prices': prices[:10],  # Limit results
+            'percentages': percentages[:10],
+            'tickers': list(set(tickers)),
+            'numbers': numbers[:10],
+            'has_financial_data': len(prices) > 0 or len(percentages) > 0 or len(tickers) > 0
         }
     
-    def calculate_risk_score(self, sentiment_data: Dict, metrics_data: Dict) -> Dict[str, Any]:
-        """Calculate risk score based on sentiment and content"""
-        base_score = 50  # Neutral starting point
+    def calculate_risk_score(self, sentiment_data: dict, financial_data: dict) -> dict:
+        """Calculate risk score"""
+        base_score = 50
         
-        # Adjust based on sentiment
+        # Sentiment impact
         if sentiment_data['sentiment'] == 'Positive':
-            base_score -= 20
+            base_score -= 15
         elif sentiment_data['sentiment'] == 'Negative':
-            base_score += 30
-            
-        # Adjust based on keyword balance
-        if metrics_data['negative_keywords'] > metrics_data['positive_keywords']:
-            base_score += 15
-        elif metrics_data['positive_keywords'] > metrics_data['negative_keywords']:
+            base_score += 25
+        
+        # Financial data impact
+        if financial_data['has_financial_data']:
+            base_score -= 5  # Having financial data reduces uncertainty
+        
+        # Word balance impact
+        if sentiment_data['negative_count'] > sentiment_data['positive_count']:
+            base_score += 10
+        elif sentiment_data['positive_count'] > sentiment_data['negative_count']:
             base_score -= 10
-            
-        # Ensure score is within bounds
+        
         risk_score = max(0, min(100, base_score))
         
-        if risk_score < 30:
+        if risk_score < 35:
             risk_level = 'Low'
-            risk_color = '#28a745'
-        elif risk_score < 70:
+            risk_class = 'risk-low'
+        elif risk_score < 65:
             risk_level = 'Medium'
-            risk_color = '#ffc107'
+            risk_class = 'risk-medium'
         else:
             risk_level = 'High'
-            risk_color = '#dc3545'
-            
+            risk_class = 'risk-high'
+        
         return {
             'score': risk_score,
             'level': risk_level,
-            'color': risk_color
+            'class': risk_class
         }
 
-def get_rss_news(rss_urls: List[str]) -> List[Dict]:
-    """Fetch news from RSS feeds"""
-    news_articles = []
-    
-    for url in rss_urls:
-        try:
-            feed = feedparser.parse(url)
-            for entry in feed.entries[:5]:  # Limit to 5 articles per feed
-                news_articles.append({
-                    'title': entry.title,
-                    'description': entry.get('description', ''),
-                    'link': entry.link,
-                    'published': entry.get('published', ''),
-                    'source': feed.feed.get('title', 'Unknown')
-                })
-        except Exception as e:
-            st.error(f"Error fetching from {url}: {str(e)}")
-    
-    return news_articles
-
-def get_stock_data(ticker: str) -> Dict:
-    """Get real-time stock data"""
+def get_yahoo_finance_rss():
+    """Get news from Yahoo Finance RSS"""
     try:
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="1d", interval="1m")
-        info = stock.info
+        url = "https://feeds.finance.yahoo.com/rss/2.0/headline"
+        response = requests.get(url, timeout=10)
         
-        if not hist.empty:
-            current_price = hist['Close'].iloc[-1]
-            open_price = hist['Open'].iloc[0]
-            change = current_price - open_price
-            change_percent = (change / open_price) * 100
+        if response.status_code == 200:
+            # Parse XML manually
+            root = ET.fromstring(response.content)
+            articles = []
             
-            return {
-                'symbol': ticker,
-                'current_price': current_price,
-                'change': change,
-                'change_percent': change_percent,
-                'volume': hist['Volume'].iloc[-1],
-                'high': hist['High'].max(),
-                'low': hist['Low'].min(),
-                'company_name': info.get('shortName', ticker)
-            }
+            for item in root.findall('.//item')[:10]:  # Get first 10 items
+                title = item.find('title')
+                description = item.find('description')
+                link = item.find('link')
+                pubDate = item.find('pubDate')
+                
+                articles.append({
+                    'title': title.text if title is not None else 'No title',
+                    'description': description.text if description is not None else 'No description',
+                    'link': link.text if link is not None else '#',
+                    'pubDate': pubDate.text if pubDate is not None else 'No date',
+                    'source': 'Yahoo Finance'
+                })
+            
+            return articles
+        
     except Exception as e:
-        st.error(f"Error fetching stock data for {ticker}: {str(e)}")
+        st.error(f"Error fetching Yahoo Finance RSS: {str(e)}")
+        return []
+
+def get_mock_stock_data(ticker: str) -> dict:
+    """Generate mock stock data for demonstration"""
+    import random
     
-    return None
+    # Generate realistic stock data
+    base_price = random.uniform(50, 500)
+    change = random.uniform(-10, 10)
+    change_percent = (change / base_price) * 100
+    
+    return {
+        'symbol': ticker,
+        'current_price': base_price,
+        'change': change,
+        'change_percent': change_percent,
+        'volume': random.randint(1000000, 10000000),
+        'high': base_price + random.uniform(0, 5),
+        'low': base_price - random.uniform(0, 5)
+    }
 
 def main():
     # Initialize analyzer
-    analyzer = FinanceNewsAnalyzer()
+    analyzer = SimpleFinanceAnalyzer()
     
     # Header
     st.markdown("""
     <div class="main-header">
         <h1>📈 Real-Time Finance News Analyzer</h1>
-        <p>Analyze financial news sentiment and extract key insights in real-time</p>
+        <p>Analyze financial news sentiment and extract key insights</p>
     </div>
     """, unsafe_allow_html=True)
     
-    # Sidebar configuration
+    # Sidebar
     st.sidebar.header("⚙️ Configuration")
     
-    # Auto-refresh option
-    auto_refresh = st.sidebar.checkbox("Auto-refresh every 30 seconds", value=False)
+    # Auto-refresh
+    auto_refresh = st.sidebar.checkbox("Auto-refresh (30s)", value=False)
     
-    # Data sources
-    st.sidebar.subheader("📊 Data Sources")
-    use_rss = st.sidebar.checkbox("Enable RSS News Feeds", value=True)
-    use_manual = st.sidebar.checkbox("Manual Text Analysis", value=True)
+    # Analysis options
+    st.sidebar.subheader("📊 Analysis Options")
+    show_manual = st.sidebar.checkbox("Manual Text Analysis", value=True)
+    show_news = st.sidebar.checkbox("Live News Feed", value=True)
+    show_stocks = st.sidebar.checkbox("Stock Monitor", value=True)
     
-    # RSS feeds
-    rss_feeds = [
-        "https://feeds.finance.yahoo.com/rss/2.0/headline",
-        "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-        "https://www.marketwatch.com/rss/topstories",
-        "https://feeds.bloomberg.com/markets/news.rss"
-    ]
-    
-    # Main content area
-    if use_manual:
+    # Manual Analysis Section
+    if show_manual:
         st.header("📝 Manual News Analysis")
         
-        # Text input
+        # Sample texts for quick testing
+        sample_texts = {
+            "Positive Example": "Apple Inc. reported strong quarterly earnings today, with revenue jumping 12% year-over-year to $85.5 billion. The tech giant beat analyst expectations, with iPhone sales showing robust growth. The stock surged 8% in after-hours trading.",
+            "Negative Example": "Tesla shares plummeted 15% after the company missed quarterly delivery targets. The electric vehicle maker reported weaker than expected sales, citing supply chain challenges and increased competition. Analysts downgraded the stock.",
+            "Neutral Example": "Microsoft announced a new quarterly dividend of $0.68 per share, maintaining its current payout ratio. The company also confirmed its annual shareholders meeting will be held next month. No major changes to guidance were announced."
+        }
+        
+        selected_sample = st.selectbox("Quick Examples:", ["Select an example..."] + list(sample_texts.keys()))
+        
+        if selected_sample != "Select an example...":
+            news_text = sample_texts[selected_sample]
+        else:
+            news_text = ""
+        
         news_text = st.text_area(
             "Enter financial news text:",
+            value=news_text,
             height=150,
             placeholder="Paste your financial news article here for analysis..."
         )
         
-        # Example button
-        if st.button("Load Example Text"):
-            news_text = """Apple Inc. (AAPL) reported strong quarterly earnings today, with revenue jumping 12% year-over-year to $85.5 billion. The tech giant beat analyst expectations on both revenue and earnings per share, with iPhone sales showing robust growth despite supply chain challenges. CEO Tim Cook highlighted the company's strong performance in services revenue, which grew 15% to $19.2 billion. The stock surged 8% in after-hours trading following the announcement."""
-            st.rerun()
-        
-        if news_text and st.button("🔍 Analyze Text"):
-            # Analyze the text
-            sentiment_data = analyzer.analyze_sentiment(news_text)
-            metrics_data = analyzer.extract_financial_metrics(news_text)
-            risk_data = analyzer.calculate_risk_score(sentiment_data, metrics_data)
+        if news_text and st.button("🔍 Analyze Text", type="primary"):
+            # Perform analysis
+            sentiment_data = analyzer.simple_sentiment_analysis(news_text)
+            financial_data = analyzer.extract_financial_data(news_text)
+            risk_data = analyzer.calculate_risk_score(sentiment_data, financial_data)
             
-            # Display results
-            col1, col2, col3 = st.columns(3)
+            # Display metrics
+            col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric(
-                    "Sentiment",
-                    sentiment_data['sentiment'],
-                    f"{sentiment_data['polarity']:.2f}"
-                )
+                st.metric("Sentiment", sentiment_data['sentiment'], f"{sentiment_data['polarity']:.2f}")
             
             with col2:
-                st.metric(
-                    "Risk Level",
-                    risk_data['level'],
-                    f"{risk_data['score']}/100"
-                )
+                st.metric("Risk Level", risk_data['level'], f"{risk_data['score']}/100")
             
             with col3:
-                st.metric(
-                    "Financial Keywords",
-                    metrics_data['total_financial_words'],
-                    f"Pos: {metrics_data['positive_keywords']}, Neg: {metrics_data['negative_keywords']}"
-                )
+                st.metric("Positive Words", sentiment_data['positive_count'])
             
-            # Detailed analysis
+            with col4:
+                st.metric("Negative Words", sentiment_data['negative_count'])
+            
+            # Detailed results
             st.subheader("📊 Detailed Analysis")
             
             col1, col2 = st.columns(2)
             
             with col1:
-                st.write("**Extracted Information:**")
-                if metrics_data['tickers']:
-                    st.write(f"🏢 **Tickers:** {', '.join(metrics_data['tickers'])}")
-                if metrics_data['prices']:
-                    st.write(f"💰 **Prices:** {', '.join(metrics_data['prices'])}")
-                if metrics_data['percentages']:
-                    st.write(f"📈 **Percentages:** {', '.join(metrics_data['percentages'])}")
+                st.write("**🔍 Extracted Financial Data:**")
+                if financial_data['tickers']:
+                    st.write(f"**Tickers:** {', '.join(financial_data['tickers'])}")
+                if financial_data['prices']:
+                    st.write(f"**Prices:** {', '.join(financial_data['prices'])}")
+                if financial_data['percentages']:
+                    st.write(f"**Percentages:** {', '.join(financial_data['percentages'])}")
+                
+                if not financial_data['has_financial_data']:
+                    st.write("*No specific financial data detected*")
             
             with col2:
-                st.write("**Sentiment Details:**")
-                st.write(f"📊 **Polarity:** {sentiment_data['polarity']:.2f}")
-                st.write(f"🎯 **Subjectivity:** {sentiment_data['subjectivity']:.2f}")
-                st.write(f"🔒 **Confidence:** {sentiment_data['confidence']:.2f}")
+                st.write("**📈 Sentiment Analysis:**")
+                st.write(f"**Sentiment:** {sentiment_data['sentiment']}")
+                st.write(f"**Polarity:** {sentiment_data['polarity']:.2f}")
+                st.write(f"**Confidence:** {sentiment_data['confidence']:.2f}")
+                
+                # Risk assessment
+                st.markdown(f"""
+                <div class="{risk_data['class']}">
+                    <strong>Risk Assessment:</strong> {risk_data['level']} ({risk_data['score']}/100)
+                </div>
+                """, unsafe_allow_html=True)
     
-    # RSS News Feed Analysis
-    if use_rss:
-        st.header("📰 Live News Feed Analysis")
+    # Live News Feed
+    if show_news:
+        st.header("📰 Live News Feed")
         
-        # Create placeholder for live data
-        news_placeholder = st.empty()
-        
-        # Fetch and display news
-        with st.spinner("Fetching latest financial news..."):
-            news_articles = get_rss_news(rss_feeds)
-        
-        if news_articles:
-            st.success(f"Found {len(news_articles)} recent articles")
+        if st.button("🔄 Refresh News"):
+            with st.spinner("Fetching latest financial news..."):
+                articles = get_yahoo_finance_rss()
             
-            # Analyze each article
-            for i, article in enumerate(news_articles[:10]):  # Show top 10
-                with st.expander(f"📄 {article['title'][:100]}..."):
-                    st.write(f"**Source:** {article['source']}")
-                    st.write(f"**Published:** {article['published']}")
-                    st.write(f"**Link:** {article['link']}")
-                    
-                    # Analyze article
-                    full_text = f"{article['title']} {article['description']}"
-                    if len(full_text) > 50:
-                        sentiment = analyzer.analyze_sentiment(full_text)
-                        metrics = analyzer.extract_financial_metrics(full_text)
+            if articles:
+                st.success(f"Found {len(articles)} recent articles")
+                
+                for i, article in enumerate(articles):
+                    with st.expander(f"📄 {article['title'][:80]}..."):
+                        st.write(f"**Source:** {article['source']}")
+                        st.write(f"**Published:** {article['pubDate']}")
+                        st.write(f"**Description:** {article['description']}")
+                        st.write(f"**Link:** [Read more]({article['link']})")
                         
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.write(f"**Sentiment:** {sentiment['sentiment']}")
-                        with col2:
-                            st.write(f"**Polarity:** {sentiment['polarity']:.2f}")
-                        with col3:
-                            st.write(f"**Tickers:** {', '.join(metrics['tickers']) if metrics['tickers'] else 'None'}")
+                        # Quick analysis
+                        full_text = f"{article['title']} {article['description']}"
+                        if len(full_text) > 50:
+                            sentiment = analyzer.simple_sentiment_analysis(full_text)
+                            financial = analyzer.extract_financial_data(full_text)
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.write(f"**Sentiment:** {sentiment['sentiment']}")
+                            with col2:
+                                st.write(f"**Polarity:** {sentiment['polarity']:.2f}")
+                            with col3:
+                                if financial['tickers']:
+                                    st.write(f"**Tickers:** {', '.join(financial['tickers'])}")
+                                else:
+                                    st.write("**Tickers:** None detected")
+            else:
+                st.warning("No articles found. Try refreshing or check your internet connection.")
     
-    # Stock prices section
-    st.header("💹 Real-Time Stock Prices")
-    
-    selected_tickers = st.multiselect(
-        "Select stocks to monitor:",
-        analyzer.stock_tickers,
-        default=['AAPL', 'GOOGL', 'MSFT', 'TSLA']
-    )
-    
-    if selected_tickers:
-        stock_cols = st.columns(min(len(selected_tickers), 4))
+    # Stock Monitor
+    if show_stocks:
+        st.header("💹 Stock Monitor")
+        st.info("📊 Live stock data integration coming soon! Currently showing demo data.")
         
-        for i, ticker in enumerate(selected_tickers):
-            with stock_cols[i % 4]:
-                stock_data = get_stock_data(ticker)
-                if stock_data:
+        selected_tickers = st.multiselect(
+            "Select stocks to monitor:",
+            analyzer.stock_tickers,
+            default=['AAPL', 'GOOGL', 'MSFT', 'TSLA']
+        )
+        
+        if selected_tickers:
+            cols = st.columns(min(len(selected_tickers), 4))
+            
+            for i, ticker in enumerate(selected_tickers):
+                with cols[i % 4]:
+                    stock_data = get_mock_stock_data(ticker)
+                    
+                    # Determine color based on change
                     delta_color = "normal" if stock_data['change'] >= 0 else "inverse"
+                    
                     st.metric(
                         f"{ticker}",
                         f"${stock_data['current_price']:.2f}",
                         f"{stock_data['change']:+.2f} ({stock_data['change_percent']:+.1f}%)",
                         delta_color=delta_color
                     )
+    
+    # Performance Dashboard
+    st.header("📊 Analysis Dashboard")
+    
+    # Create sample data for visualization
+    if 'analysis_history' not in st.session_state:
+        st.session_state.analysis_history = []
+    
+    # Add current analysis to history (if available)
+    if st.button("📈 Generate Sample Analytics"):
+        # Create sample sentiment data over time
+        dates = pd.date_range(start='2024-01-01', end='2024-12-31', freq='D')
+        sentiment_scores = np.random.normal(0, 0.3, len(dates))
+        
+        df = pd.DataFrame({
+            'Date': dates,
+            'Sentiment_Score': sentiment_scores,
+            'Risk_Score': 50 + sentiment_scores * 30 + np.random.normal(0, 10, len(dates))
+        })
+        
+        # Plot sentiment over time
+        fig = px.line(df, x='Date', y='Sentiment_Score', 
+                     title='Sentiment Analysis Over Time',
+                     labels={'Sentiment_Score': 'Sentiment Score'})
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Risk score distribution
+        fig2 = px.histogram(df, x='Risk_Score', nbins=20,
+                           title='Risk Score Distribution',
+                           labels={'Risk_Score': 'Risk Score'})
+        st.plotly_chart(fig2, use_container_width=True)
     
     # Auto-refresh logic
     if auto_refresh:
@@ -388,10 +431,10 @@ def main():
     
     # Footer
     st.markdown("---")
-    st.markdown("""
+    st.markdown(f"""
     <div style="text-align: center; color: #666;">
         <p>📈 Real-Time Finance News Analyzer | Built with Streamlit</p>
-        <p>Data sources: Yahoo Finance, RSS Feeds | Last updated: """ + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + """</p>
+        <p>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
     </div>
     """, unsafe_allow_html=True)
 
